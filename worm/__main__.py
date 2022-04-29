@@ -12,4 +12,5 @@ if __name__ == '__main__':
         exit()
     adress = sys.argv[1].split(':')
     adress[1] = int(adress[1])
-    Worm_server((adress[0], WORMPORT),Handler, adress, 0)
+    num_worms = int(sys.argv[2])
+    Worm_server((adress[0], WORMPORT),Handler, adress,num_worms)
