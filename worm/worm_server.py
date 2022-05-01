@@ -9,7 +9,7 @@ import logging
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        logging.debug(f"{self.server.id}: Got request: {self.path}")
+        logging.debug(f"{self.server.id}: Got GET request: {self.path}")
         args = self.path.split('/')[1:]
         if args[0] == "ping":
             self.send_response(200)
@@ -65,14 +65,47 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        pass
-
-        
+        # logging.debug(f"{self.server.id}: Got POST request: {self.path}")
+        args = self.path.split('/')[1:]
+        logging.debug(f"{self.server.id}: Got POST request: args: {args}")
+        if args[0] == "shutdown":
+            logging.debug(f"{self.server.id}: Got shutdown request")
+            self.send_response(200)
+            self.send_header("Content-type", "text/json")
+            self.end_headers()
+            self.server.shutdown()
+        elif args[0] == "kill_all":
+            logging.debug(f"{self.server.id}: Got order 66 request")
+            self.send_response(200)
+            self.send_header("Content-type", "text/json")
+            self.end_headers()
+            self.server.kill_all()
+        elif args[0] == "change_size":
+            new_size = int(args[1])
+            logging.debug(f"{self.server.id}: Got change size request, new size: {new_size}")
+            self.send_response(200)
+            self.send_header("Content-type", "text/json")
+            self.end_headers()
+            # self.server.size_lock.aquire()
+            # self.server.new_size = int(new_size)
+            # self.server.size_lock.release()
+            self.server.change_size(new_size)
+        elif args[0] == "new_size":
+            new_size = int(args[1])
+            logging.debug(f"{self.server.id}: Got new size from leader, new size: {new_size}")
+            self.server.max_worms = new_size-1
+            self.send_response(200)
+            self.send_header("Content-type", "text/json")
+            self.end_headers()
+            logging.debug(f"{self.server.id}: Commited new size to {self.server.max_worms}")
 
 class Worm_server(ThreadingHTTPServer):
-    def __init__(self, server_address, RequestHandlerClass,gate_server, num_worms):
+    def __init__(self, server_address, RequestHandlerClass,gate_server, num_worms, log=False):
 
-        logging.basicConfig(filename=f'/home/vho023/3203/worm/worm-assignment-2022/debug_{server_address[0]}.log', level=logging.DEBUG)
+        if log:
+            logging.basicConfig(filename=f'/home/vho023/3203/worm/worm-assignment-2022/debug_{server_address[0]}.log', level=logging.DEBUG)
+        else:
+            logging.disable()
         super().__init__(server_address, RequestHandlerClass)
         self.main_thread = Thread(target=self.run)
         self.gate = gate_server
@@ -81,20 +114,28 @@ class Worm_server(ThreadingHTTPServer):
         self.gate_info = self.get_gate_info(self.gate)
         self.fellow_worms = []
         self.max_worms = num_worms-1
+        self.new_size = self.max_worms
         self.epoch = 0
         self.voted = False
         self.leader = None
         self.voting_booth = Lock()
+        self.size_lock = Lock()
+        self.alive = True
 
         #Last thing to do in init
         self.main_thread.start()
         self.serve_forever()
     
+    def shutdown(self) -> None:
+        logging.debug(f"{self.id}: Shutting down")
+        super().shutdown()
+        self.alive = False
+
     def run(self):
         logging.debug(f"{self.id}: Starting body")
         live_list,dead_list = self.get_worm_state()
         self.elect_leader(live_list)
-        while True:
+        while self.alive:
             time.sleep((random.random()*5)+1)
 
             if self.leader == self.id:
@@ -103,7 +144,11 @@ class Worm_server(ThreadingHTTPServer):
                 if len(live_list) <= self.max_worms:
                     logging.debug(f"{self.id}: Should be {self.max_worms} worms, Need to spawn {self.max_worms-len(live_list)}")
                     for gate in dead_list[:self.max_worms-len(live_list)]:
-                                self.spawn_worm((gate, self.gate_dict[gate]))
+                        self.spawn_worm((gate, self.gate_dict[gate]))
+                if len(live_list) > self.max_worms:
+                    logging.debug(f"{self.id}: Should be {self.max_worms} worms, Need to kill {len(live_list)-self.max_worms}")
+                    for gate in live_list[:len(live_list)-self.max_worms]:
+                        self.kill_worm((gate, self.gate_dict[gate]))
             else:
                 #Ping leader
                 is_alive = self.ping_worm((self.leader, self.worm_ports))
@@ -112,6 +157,53 @@ class Worm_server(ThreadingHTTPServer):
                     logging.debug(f"{self.id}: Leader has fallen, elect new leader")
                     live_list, _ = self.get_worm_state()
                     self.elect_leader(live_list)
+    
+    def kill_all(self):
+        if self.leader == self.id:
+            logging.debug(f"{self.id}: Got order 66 as leader")
+            live_list, _ = self.get_worm_state()
+            for gate in live_list:
+                logging.debug(f"{self.id}: Telling {gate} to kill self")
+                r = requests.post(f"http://{gate}:{self.worm_ports}/shutdown")
+            logging.debug(f"{self.id}: Everybody is dead, killing myself")
+            self.shutdown()
+            
+        else:
+            #I am follower, need to notify the leader
+            logging.debug(f"{self.id}: Notify my leader {self.leader} of order 66")
+            try:
+                r = requests.post(f"http://{self.leader}:{self.worm_ports}/kill_all")
+            except requests.exceptions.ConnectionError:
+                return
+
+    
+    def change_size(self, new_size):
+        if self.leader == self.id:
+            live_list, _ = self.get_worm_state()
+            if len(live_list) == 0:
+                logging.debug(f"{self.id}: Changing size, all alone, majority by default")
+                self.max_worms = new_size - 1
+                return
+            count = 0
+            logging.debug(f"{self.id}:Need to notify followers of size change,  Found live worms {live_list}")
+            for gate in live_list:
+                logging.debug(f"{self.id}: Telling {gate} to change size to {new_size}")
+                r = requests.post(f"http://{gate}:{self.worm_ports}/new_size/{new_size}")
+                logging.debug(f"{self.id}: Got response {r.status_code} from {gate} about size change")
+                if r.status_code == 200:
+                    logging.debug(f"{self.id}: {gate} accepted size change to {new_size}")
+                    count += 1
+            #Commit if majority has accepted new size
+            if count > len(live_list)//2:
+                logging.debug(f"{self.id}: Got majority for size change, commiting size change")
+                self.max_worms = new_size-1
+        else:
+            #I am follower, need to notify the leader
+            logging.debug(f"{self.id}: Notify my leader {self.leader} to change size to {new_size}")
+            try:
+                r = requests.post(f"http://{self.leader}:{self.worm_ports}/change_size/{new_size}")
+            except requests.exceptions.ConnectionError:
+                return
 
     def get_worm_state(self):
         live_list = []
@@ -126,6 +218,7 @@ class Worm_server(ThreadingHTTPServer):
 
     def elect_leader(self, live_list):
         logging.debug(f"{self.id}: Throwing election")
+        #Might need to check size
         self.epoch += 1
         if len(live_list) == 0:
             logging.debug(f"{self.id}: All alone, leader by deafault")
@@ -199,3 +292,11 @@ class Worm_server(ThreadingHTTPServer):
         # logging.debug(f"{self.id}: Spawning new worm at {gate} with {url}")
         r = requests.post(f"http://{gate[0]}:{gate[1]}/worm_entrance?args={gate[0]}:{gate[1]}&args={self.max_worms+1}", data=executable)
         self.fellow_worms.append(gate)
+    
+    def kill_worm(self, gate):
+        logging.debug(f"{self.id}: Killing worm at {gate[0]}")
+        try:
+            r = requests.post(f"http://{gate[0]}:{self.worm_ports}/shutdown")
+        except requests.exceptions.ConnectionError:
+            #If worm allready dead, don't care
+            return
