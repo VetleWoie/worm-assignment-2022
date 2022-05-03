@@ -58,6 +58,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.leader = new_leader
                 self.server.epoch = epoch
                 self.server.voted = False
+        elif args[0] == 'benchmark_leader':
+            self.send_response(200)
+            self.send_header("Content-type", "text/json")
+            self.end_headers()
+            response = {'epoch' : self.server.epoch, 'leader' : self.server.leader}
+            self.wfile.write(json.dumps(response).encode())
         else:
             logging.debug(f"{self.server.id}: Got wrong request: Request: {self.path}")
             self.send_response(498)
@@ -136,7 +142,8 @@ class Worm_server(ThreadingHTTPServer):
         live_list,dead_list = self.get_worm_state()
         self.elect_leader(live_list)
         while self.alive:
-            time.sleep((random.random()*5)+1)
+            #Sleep for random amount between 0 and 1
+            time.sleep(random.random())
 
             if self.leader == self.id:
                 live_list,dead_list = self.get_worm_state()
