@@ -6,7 +6,7 @@
 # Mandatory Assignment 2: The Worm
 
 UiT INF-3203, Spring 2022 \
-Mike Murphy and Otto Anshus
+Vetle Hofsøy-Woie, Ragnar Helgaas
 
 **Due date: Wednesday May 04 at 14:15**
 
